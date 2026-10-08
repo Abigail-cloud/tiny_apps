@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support tickets</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Tiny support tickets</h1>
+  <div>
+    <button id="exportBtn">Export backup</button>
+    <button id="importBtn">Import backup</button>
+    <input type="file" id="importFile" accept="application/json" hidden>
+    <button class="primary" id="newBtn">New ticket</button>
+  </div>
+</header>
+<main>
+  <section class="panel" aria-label="Ticket list">
+    <div class="tabs" id="tabs"></div>
+    <div id="list"></div>
+  </section>
+  <section class="panel" id="detail" aria-live="polite"><p class="meta">Loading Python…</p></section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+<script>
+const STATUSES = ["open", "in_progress", "resolved", "closed"];
+const PRIORITIES = ["low", "medium", "high", "urgent"];
+const FUNCS = ["list_tickets","get_ticket","create_ticket","update_ticket","add_comment","delete_ticket","export_data","import_data"];
+let filter = "", currentId = null, py = {};
+
+/* Call a function in app.py and parse its JSON reply */
+const call = (fn, ...args) => JSON.parse(py[fn](...args));
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const label = s => s.replace('_',' ').replace(/^./, c => c.toUpperCase());
+const fmt = iso => new Date(iso).toLocaleString([], {dateStyle:'medium', timeStyle:'short'});
+const opts = (arr, sel) => arr.map(v => `<option value="${v}" ${v===sel?'selected':''}>${label(v)}</option>`).join('');
+
+function renderTabs() {
+  const all = [["", "All"], ...STATUSES.map(s => [s, label(s)])];
+  $('#tabs').innerHTML = all.map(([s, l]) => `<button class="tab" data-s="${s}" aria-pressed="${s===filter}">${l}</button>`).join('');
+}
+
+function renderList() {
+  const tickets = call('list_tickets', filter);
+  $('#list').innerHTML = tickets.length ? tickets.map(t => `
+    <button class="ticket" data-id="${t.id}" aria-current="${t.id===currentId}">
+      <b>#${t.id} ${esc(t.title)}</b>
+      <span class="badge p-${t.priority}">${label(t.priority)}</span>
+      <span class="meta">${label(t.status)} · ${esc(t.requester)} · ${fmt(t.updated_at)}</span>
+    </button>`).join('') : '<p class="meta">No tickets here. Create one with “New ticket”.</p>';
+}
+
+function showNew() {
+  currentId = null; renderList();
+  $('#detail').innerHTML = `
+    <h2>New ticket</h2>
+    <label for="n-title">Title</label><input id="n-title" maxlength="120">
+    <label for="n-desc">What happened?</label><textarea id="n-desc"></textarea>
+    <div class="row">
+      <div><label for="n-who">Your name</label><input id="n-who"></div>
+      <div><label for="n-pri">Priority</label><select id="n-pri">${opts(PRIORITIES,'medium')}</select></div>
+    </div>
+    <p class="err" id="err"></p>
+    <button class="primary" id="create">Create ticket</button>`;
+  $('#create').onclick = () => {
+    const r = call('create_ticket', $('#n-title').value, $('#n-desc').value, $('#n-who').value, $('#n-pri').value);
+    if (r.error) { $('#err').textContent = r.error; return; }
+    openTicket(r.id);
+  };
+}
+
+function openTicket(id) {
+  const t = call('get_ticket', id);
+  if (t.error) { showNew(); return; }
+  currentId = id;
+  $('#detail').innerHTML = `
+    <h2>#${t.id} ${esc(t.title)}</h2>
+    <p class="meta">Opened by ${esc(t.requester)} on ${fmt(t.created_at)}</p>
+    <p style="white-space:pre-wrap">${esc(t.description) || '<span class="meta">No description.</span>'}</p>
+    <div class="row">
+      <div><label for="d-status">Status</label><select id="d-status">${opts(STATUSES,t.status)}</select></div>
+      <div><label for="d-pri">Priority</label><select id="d-pri">${opts(PRIORITIES,t.priority)}</select></div>
+    </div>
+    <h2 style="margin-top:1.5rem">Comments</h2>
+    ${t.comments.map(c => `<div class="comment"><b>${esc(c.author)}</b> <span class="meta">${fmt(c.created_at)}</span><div style="white-space:pre-wrap">${esc(c.body)}</div></div>`).join('') || '<p class="meta">No comments yet.</p>'}
+    <label for="c-who">Your name</label><input id="c-who">
+    <label for="c-body">Add a comment</label><textarea id="c-body"></textarea>
+    <p class="err" id="err"></p>
+    <div class="row"><button class="primary" id="addC">Add comment</button><button class="danger" id="del">Delete ticket</button></div>`;
+  $('#d-status').onchange = e => { call('update_ticket', id, e.target.value, ''); openTicket(id); };
+  $('#d-pri').onchange = e => { call('update_ticket', id, '', e.target.value); openTicket(id); };
+  $('#addC').onclick = () => {
+    const r = call('add_comment', id, $('#c-who').value, $('#c-body').value);
+    if (r.error) { $('#err').textContent = r.error; return; }
+    openTicket(id);
+  };
+  $('#del').onclick = () => {
+    if (!confirm(`Delete ticket #${id}? This can't be undone.`)) return;
+    call('delete_ticket', id); showNew();
+  };
+  renderList();
+}
+
+function wireEvents() {
+  $('#newBtn').onclick = showNew;
+  $('#list').onclick = e => { const b = e.target.closest('.ticket'); if (b) openTicket(+b.dataset.id); };
+  $('#tabs').onclick = e => {
+    const b = e.target.closest('.tab'); if (!b) return;
+    filter = b.dataset.s; renderTabs(); renderList();
+  };
+  $('#exportBtn').onclick = () => {
+    const blob = new Blob([py.export_data()], {type: 'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `tickets-${new Date().toISOString().slice(0,10)}.json`;
+    a.click(); URL.revokeObjectURL(a.href);
+  };
+  $('#importBtn').onclick = () => $('#importFile').click();
+  $('#importFile').onchange = async e => {
+    const file = e.target.files[0]; e.target.value = '';
+    if (!file) return;
+    if (!confirm('Replace all current tickets with this backup?')) return;
+    const r = call('import_data', await file.text());
+    if (r.error) alert(r.error); else showNew();
+  };
+}
+
+/* Start Python, load app.py, then draw the page */
+async function boot() {
+  try {
+    const pyodide = await loadPyodide();
+    const res = await fetch('app.py');
+    if (!res.ok) throw new Error('Could not load app.py');
+    pyodide.runPython(await res.text());
+    FUNCS.forEach(n => py[n] = pyodide.globals.get(n));
+    wireEvents(); renderTabs(); showNew();
+  } catch (err) {
+    $('#detail').innerHTML = `<h2>Couldn't start</h2><p>${esc(err.message)}</p>
+      <p class="meta">This page loads app.py with fetch, so it must be served over http(s), not opened as a file. Use GitHub Pages, or run <code>python -m http.server</code> in this folder.</p>`;
+  }
+}
+boot();
+</script>
+</body>
+</html>
